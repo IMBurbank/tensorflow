@@ -47,6 +47,12 @@ flags.DEFINE_string(
     short_name='s')
 
 flags.DEFINE_string(
+    'bashrc_file',
+    './bashrc',
+    'Path to image bashrc file',
+    short_name='b')
+
+flags.DEFINE_string(
     'output_dir',
     './dockerfiles', ('Path to an output directory for Dockerfiles. '
                       'Will be created if it doesn\'t exist.'),
@@ -528,6 +534,11 @@ def main(argv):
   else:
     print('>> WARNING: Not validating {}'.format(FLAGS.spec_file))
 
+  # Abort if bashrc path is invalid
+  if not os.path.exists(FLAGS.bashrc_file):
+    print('>> ERROR: {} is an invalid bashrc path!'.format(FLAGS.bashrc_file))
+    exit(1)
+
   # Generate mapping of { "cpu-devel": "<cpu-devel dockerfile contents>", ... }
   names_to_contents = construct_dockerfiles(tf_spec)
 
@@ -536,6 +547,7 @@ def main(argv):
     print('>> Emptying destination dir "{}"'.format(FLAGS.output_dir))
     shutil.rmtree(FLAGS.output_dir, ignore_errors=True)
     mkdir_p(FLAGS.output_dir)
+    shutil.copy(FLAGS.bashrc_file, FLAGS.output_dir)
   else:
     print('>> Skipping creation of {} (dry run)'.format(FLAGS.output_dir))
   for name, contents in names_to_contents.items():

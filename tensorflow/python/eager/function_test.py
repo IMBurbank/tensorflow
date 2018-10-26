@@ -85,7 +85,6 @@ class DefunnedMiniModel(MiniModel):
     return super(DefunnedMiniModel, self).call(inputs, training=training)
 
 
-@test_util.with_c_shapes
 class FunctionTest(test.TestCase, parameterized.TestCase):
 
   def testBasic(self):
@@ -109,6 +108,21 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
     with context.rewriter_config(rewrites):
       t = constant_op.constant(1.0)
       self.assertAllEqual(add(t, t).numpy(), 2.0)
+
+  def testFuncName(self):
+
+    @function.defun_with_attributes(attributes={'func_name': 'multiply'})
+    def add(x, y):
+      _ = x * y
+      return x + y
+
+    @function.defun
+    def add_2(x, y):
+      _ = x * y
+      return x + y
+
+    self.assertEqual(add._name, 'multiply')
+    self.assertEqual(add_2._name, 'add_2')
 
   def testBasicGraphMode(self):
     matmul = def_function.function(math_ops.matmul)
@@ -149,7 +163,7 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
 
   def testGraphGradientVariable(self):
     with ops.Graph().as_default(), self.cached_session():
-      v = resource_variable_ops.ResourceVariable(1.0)
+      v = variables.Variable(1.0)
 
       @def_function.function
       def f():
@@ -163,9 +177,9 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
 
   def testGraphEagerIsolation(self):
 
-    @def_function.function
+    @function.defun
     def f():
-      self.v = resource_variable_ops.ResourceVariable(1.0)
+      self.v = variables.Variable(1.0)
       return self.v.read_value()
 
     self.assertAllEqual(f(), 1.0)
@@ -237,9 +251,6 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
     self.assertSequenceEqual(outputs, expected)
 
   def testExecutingManyStatelessDefunsConcurrently(self):
-    # TODO(nareshmodi): Re-enable this test when grappler is faster, or
-    # simply disable grappler for this test.
-    self.skipTest('Very slow with grappler enabled, in fastbuild mode.')
 
     @def_function.function
     def stateless(x):
@@ -269,9 +280,6 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
     self.assertEqual(float(v.read_value()), 0.0)
 
   def testExecutingManyStatefulDefunsConcurrently(self):
-    # TODO(nareshmodi): Re-enable this test when grappler is faster, or
-    # simply disable grappler for this test.
-    self.skipTest('Very slow with grappler enabled, in fastbuild mode.')
 
     v = resource_variable_ops.ResourceVariable(1.0)
 
@@ -669,7 +677,7 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
 
   def testSymbolicGradientVariableNoneNotZerosLike(self):
     with ops.Graph().as_default():
-      v = resource_variable_ops.ResourceVariable(1.0)
+      v = variables.Variable(1.0)
 
       @def_function.function
       def f(x, v):
@@ -684,7 +692,7 @@ class FunctionTest(test.TestCase, parameterized.TestCase):
         self.assertEqual(dv, None)
 
   def testGraphModeManyFunctions(self):
-    with context.graph_mode(), self.cached_session():
+    with ops.Graph().as_default(), self.cached_session():
 
       @def_function.function
       def f(x):
@@ -2701,6 +2709,24 @@ class ArgumentNamingTests(test.TestCase, parameterized.TestCase):
         [inp.op.get_attr('_user_specified_name') for inp in fn_op.inputs])
     self.assertEqual(2, len(fn_op.graph.structured_outputs))
 
+  def testVariable(self, function_decorator):
+    @function_decorator
+    def fn(a, b):
+      return a + b, a * b
+    # Call the function to make def_function happy
+    fn(array_ops.ones([]), array_ops.ones([]))
+
+    fn_op = fn.get_concrete_function(
+        tensor_spec.TensorSpec(shape=(None,), dtype=dtypes.float32),
+        variables.Variable(1.))
+    self.assertEqual(
+        ['a', 'b'],
+        [inp.op.name for inp in fn_op.inputs])
+    self.assertEqual(
+        [b'a', b'b'],
+        [inp.op.get_attr('_user_specified_name') for inp in fn_op.inputs])
+    self.assertEqual(2, len(fn_op.graph.structured_outputs))
+
   def testDictReturned(self, function_decorator):
     @function_decorator
     def fn(x, z=(1., 2.), y=3.):
@@ -2862,9 +2888,14 @@ class ArgumentNamingTests(test.TestCase, parameterized.TestCase):
          for inp in variadic_op.inputs])
 
 
-class DefunCollectionTest(test.TestCase):
+class DefunCollectionTest(test.TestCase, parameterized.TestCase):
 
-  def testCollectionValueAccess(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='Defun', function_decorator=function.defun),
+      dict(
+          testcase_name='DefFunction',
+          function_decorator=def_function.function))
+  def testCollectionValueAccess(self, function_decorator):
     """Read values from graph collections inside of defun."""
     with ops.Graph().as_default() as g:
       with self.session(graph=g):
@@ -2873,7 +2904,7 @@ class DefunCollectionTest(test.TestCase):
         ops.add_to_collection('x', x)
         ops.add_to_collection('y', y)
 
-        @function.defun
+        @function_decorator
         def fn():
           x_const = constant_op.constant(ops.get_collection('x')[0])
           y_const = constant_op.constant(ops.get_collection('y')[0])
@@ -2886,13 +2917,18 @@ class DefunCollectionTest(test.TestCase):
         self.assertEquals(ops.get_collection('y'), [5])
         self.assertEquals(ops.get_collection('z'), [])
 
-  def testCollectionVariableValueAccess(self):
+  @parameterized.named_parameters(
+      dict(testcase_name='Defun', function_decorator=function.defun),
+      dict(
+          testcase_name='DefFunction',
+          function_decorator=def_function.function))
+  def testCollectionVariableValueAccess(self, function_decorator):
     """Read variable value from graph collections inside of defun."""
     with ops.Graph().as_default() as g:
       with self.session(graph=g):
         v = resource_variable_ops.ResourceVariable(1.0)
 
-        @function.defun
+        @function_decorator
         def f():
           return v.read_value()
 
